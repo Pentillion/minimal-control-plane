@@ -1,2 +1,8 @@
-# minimal-control-plane
-A minimal Rust control plane simulator: resource lifecycle, state reconciliation, failure handling, and persistence.
+# Minimal Control Plane
+
+A Rust simulator of a cloud control plane with:
+
+- Resource lifecycle management (VMs, Hosts)
+- State reconciliation: desired vs actual state
+- Failure handling & retries
+- Persistence with Postgres / SQLite
