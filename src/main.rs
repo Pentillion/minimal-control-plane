@@ -1,5 +1,3 @@
-use rand::Rng;
-
 fn main() {
     let mut cp: ControlPlane = ControlPlane::new();
 
@@ -56,35 +54,64 @@ impl ControlPlane {
         if actual.state == desired.target_state {
             return;
         }
-
-        match (actual.state, desired.target_state) {
-            (VmState::Requested, VmState::Running) => {
-                actual.state = VmState::Allocated;
+        let valid_states = get_valid_states(&actual.state);
+        let next_state = choose_by_policy(valid_states, &desired.target_state);
+        match next_state {
+            None => {
+                println!(
+                    "vm={} actual={:?} desired={:?} - Unable to move to desired state, not proceeding further...",
+                    actual.id, actual, desired
+                );
             }
-            (VmState::Allocated, VmState::Running) => {
-                actual.state = VmState::Booting;
+            Some(next) => {
+                actual.state = *next;
             }
-            (VmState::Booting, VmState::Running) => {
-                let mut rng = rand::thread_rng();
-                if rng.gen_bool(0.3) {
-                    actual.state = VmState::Failed;
-                } else {
-                    actual.state = VmState::Running;
-                }
-            }
-            (VmState::Failed, VmState::Running) => {
-                actual.state = VmState::Allocated;
-            }
-            (_, VmState::Destroyed) => {
-                actual.state = VmState::Destroyed;
-            }
-            _ => {}
         }
     }
-
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+fn choose_by_policy<'a>(allowed: &'a [VmState], desired: &'a VmState) -> Option<&'a VmState> {
+    let next_states: &[VmState] = match desired {
+        VmState::Running => {
+            &[VmState::Booting, VmState::Allocated, VmState::Running]
+        }
+        VmState::Stopped => {
+            &[VmState::Stopped, VmState::Stopping]
+        }
+        VmState::Destroyed => {
+            &[VmState::Stopped, VmState::Stopping, VmState::Destroyed]
+        }
+        _ => {
+            &[]
+        }
+    };
+
+    let next_state = allowed.iter().find(|state| next_states.contains(state));
+
+    match next_state {
+        None => {
+            return None;
+        },
+        Some(state) => {
+            return Some(state);
+        }
+    }
+}
+
+fn get_valid_states(actual: &VmState) -> &[VmState] {   
+    match actual {
+        VmState::Requested => &[VmState::Allocated, VmState::Failed],
+        VmState::Allocated => &[VmState::Booting, VmState::Failed],
+        VmState::Booting => &[VmState::Running, VmState::Failed],
+        VmState::Running => &[VmState::Stopping, VmState::Failed],
+        VmState::Stopping => &[VmState::Stopped, VmState::Failed],
+        VmState::Stopped => &[VmState::Destroyed, VmState::Failed],
+        VmState::Failed => &[VmState::Allocated, VmState::Failed],
+        _ => &[]
+    } 
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum VmState {
     Requested,
     Allocated,
