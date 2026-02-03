@@ -17,7 +17,7 @@ fn main() {
     loop {
         for desired in &cp.desired_vms {
             if let Some(actual) = cp.actual_vms.iter_mut().find(|v| v.id == desired.id) {
-                ControlPlane::reconcile_vm(desired, actual);
+                ControlPlane::reconcile_vm(desired, actual, &mut cp.hosts);
                 println!("VM {} -> {:?}", actual.id, actual.state);
             }
         }
@@ -50,10 +50,23 @@ impl ControlPlane {
         }
     }
 
-    fn reconcile_vm(desired: &DesiredVm, actual: &mut ActualVm) {
+    fn reconcile_vm(desired: &DesiredVm, actual: &mut ActualVm, hosts: &mut [Host]) {
         if actual.state == desired.target_state {
             return;
         }
+
+        if actual.state == VmState::Requested {
+            if try_allocate(desired, actual, hosts) {
+                actual.state = VmState::Allocated;
+            } else {
+                println!(
+                    "vm={} actual={:?} desired={:?} - Unable to allocate vm, not proceeding further...",
+                    actual.id, actual, desired
+                );
+                return;
+            }
+        }
+
         let valid_states = get_valid_states(&actual.state);
         let next_state = choose_by_policy(valid_states, &desired.target_state);
         match next_state {
@@ -68,6 +81,22 @@ impl ControlPlane {
             }
         }
     }
+}
+
+fn try_allocate(
+    desired: &DesiredVm,
+    actual: &mut ActualVm,
+    hosts: &mut [Host]
+) -> bool {
+    for host in hosts {
+        if host.is_alive && host.total_cpu - host.used_cpu >= desired.cpu && host.total_memory_mb - host.used_memory_mb >= desired.memory_mb {
+            actual.host_id = Some(host.id);
+            host.used_cpu += desired.cpu;
+            host.used_memory_mb += desired.memory_mb;
+            return true;
+        }
+    }
+    false
 }
 
 fn choose_by_policy<'a>(allowed: &'a [VmState], desired: &'a VmState) -> Option<&'a VmState> {
