@@ -1,3 +1,5 @@
+use rand::Rng;
+
 fn main() {
     let mut cp: ControlPlane = ControlPlane::new();
 
@@ -12,13 +14,16 @@ fn main() {
         id: 1,
         state: VmState::Requested,
         host_id: None,
+        cpu: 0,
+        memory_mb: 0
     });
 
     loop {
         for desired in &cp.desired_vms {
             if let Some(actual) = cp.actual_vms.iter_mut().find(|v| v.id == desired.id) {
-                ControlPlane::reconcile_vm(desired, actual, &mut cp.hosts);
-                println!("VM {} -> {:?}", actual.id, actual.state);
+                let action = ControlPlane::reconcile_vm(desired, actual, &mut cp.hosts);
+                apply_action(action, actual, desired, &mut cp.hosts);
+                println!("VM {} -> {:?} via {:?}", actual.id, actual.state, action);
             }
         }
 
@@ -30,6 +35,15 @@ struct ControlPlane {
     desired_vms: Vec<DesiredVm>,
     actual_vms: Vec<ActualVm>,
     hosts: Vec<Host>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Action {
+    AllocateHost { host_id: u64 },
+    BootVm,
+    StopVm,
+    ReleaseResources,
+    NoOp,
 }
 
 impl ControlPlane {
@@ -50,94 +64,82 @@ impl ControlPlane {
         }
     }
 
-    fn reconcile_vm(desired: &DesiredVm, actual: &mut ActualVm, hosts: &mut [Host]) {
+    fn reconcile_vm(desired: &DesiredVm, actual: &mut ActualVm, hosts: &mut [Host]) -> Action {
         if actual.state == desired.target_state {
-            return;
+            return Action::NoOp;
         }
 
-        if actual.state == VmState::Requested {
-            if try_allocate(desired, actual, hosts) {
-                actual.state = VmState::Allocated;
+        if actual.state == VmState::Requested || (actual.state == VmState::Failed && desired.target_state == VmState::Running) {
+            if let Some(host) = hosts.iter().find(|h| h.is_alive && h.has_resources_for(desired)) {
+                return Action::AllocateHost { host_id: host.id };
             } else {
                 println!(
-                    "vm={} actual={:?} desired={:?} - Unable to allocate vm, not proceeding further...",
-                    actual.id, actual, desired
+                    "vm={} actual={:?} desired={:?} hosts={:?} - Unable to allocate vm, not proceeding further...",
+                    actual.id, actual, desired, hosts
                 );
-                return;
+                return Action::NoOp;
             }
         }
 
-        let valid_states = get_valid_states(&actual.state);
-        let next_state = choose_by_policy(valid_states, &desired.target_state);
-        match next_state {
-            None => {
-                println!(
-                    "vm={} actual={:?} desired={:?} - Unable to move to desired state, not proceeding further...",
-                    actual.id, actual, desired
-                );
+        if actual.state == VmState::Allocated && desired.target_state == VmState::Running {
+            return Action::BootVm;
+        }
+
+        if actual.state == VmState::Running && desired.target_state == VmState::Stopped {
+            return Action::StopVm;
+        }
+
+        if desired.target_state == VmState::Destroyed {
+            return Action::ReleaseResources;
+        }
+
+        Action::NoOp
+    }
+}
+
+fn apply_action(action: Action, actual: &mut ActualVm, desired: &DesiredVm, hosts: &mut [Host]) {
+    match action {
+        Action::AllocateHost { host_id } => {
+            if actual.host_id.is_none() {
+                actual.host_id = Some(host_id);
+                let host = hosts.iter_mut().find(|h| h.id == host_id).unwrap();
+                host.used_cpu += desired.cpu;
+                host.used_memory_mb += desired.memory_mb;
+                actual.cpu = desired.cpu;
+                actual.memory_mb = desired.memory_mb;
+                actual.state = VmState::Allocated;
             }
-            Some(next) => {
-                actual.state = *next;
+        }
+        Action::BootVm => {
+            actual.state = VmState::Booting;
+            let mut rng = rand::thread_rng();
+            if rng.gen_bool(0.3) {
+                actual.state = VmState::Failed;
+            } else {
+                actual.state = VmState::Running;
             }
         }
-    }
-}
+        Action::StopVm => {
+            actual.state = VmState::Stopping;
+            // instant stop for now
+            actual.state = VmState::Stopped;
+        }
+        Action::ReleaseResources => {
+            if let Some(host_id) = actual.host_id {
+                let host =  hosts.iter_mut().find(|h| h.id == host_id).unwrap();
+                host.used_cpu -= actual.cpu;
+                host.used_memory_mb -= actual.memory_mb;
+                
+            }
+            actual.host_id = None;
+            actual.state = VmState::Destroyed;
+            actual.cpu = 0;
+            actual.memory_mb = 0;
+        }
+        Action::NoOp => {
 
-fn try_allocate(
-    desired: &DesiredVm,
-    actual: &mut ActualVm,
-    hosts: &mut [Host]
-) -> bool {
-    for host in hosts {
-        if host.is_alive && host.total_cpu - host.used_cpu >= desired.cpu && host.total_memory_mb - host.used_memory_mb >= desired.memory_mb {
-            actual.host_id = Some(host.id);
-            host.used_cpu += desired.cpu;
-            host.used_memory_mb += desired.memory_mb;
-            return true;
-        }
-    }
-    false
-}
-
-fn choose_by_policy<'a>(allowed: &'a [VmState], desired: &'a VmState) -> Option<&'a VmState> {
-    let next_states: &[VmState] = match desired {
-        VmState::Running => {
-            &[VmState::Booting, VmState::Allocated, VmState::Running]
-        }
-        VmState::Stopped => {
-            &[VmState::Stopped, VmState::Stopping]
-        }
-        VmState::Destroyed => {
-            &[VmState::Stopped, VmState::Stopping, VmState::Destroyed]
-        }
-        _ => {
-            &[]
-        }
-    };
-
-    let next_state = allowed.iter().find(|state| next_states.contains(state));
-
-    match next_state {
-        None => {
-            return None;
-        },
-        Some(state) => {
-            return Some(state);
         }
     }
-}
-
-fn get_valid_states(actual: &VmState) -> &[VmState] {   
-    match actual {
-        VmState::Requested => &[VmState::Allocated, VmState::Failed],
-        VmState::Allocated => &[VmState::Booting, VmState::Failed],
-        VmState::Booting => &[VmState::Running, VmState::Failed],
-        VmState::Running => &[VmState::Stopping, VmState::Failed],
-        VmState::Stopping => &[VmState::Stopped, VmState::Failed],
-        VmState::Stopped => &[VmState::Destroyed, VmState::Failed],
-        VmState::Failed => &[VmState::Allocated, VmState::Failed],
-        _ => &[]
-    } 
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -165,9 +167,11 @@ struct ActualVm {
     id: u64,
     state: VmState,
     host_id: Option<u64>,
+    cpu: u8,
+    memory_mb: u32,
 }
 
-
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Host {
     id: u64,
     total_cpu: u8,
@@ -175,4 +179,13 @@ struct Host {
     total_memory_mb: u32,
     used_memory_mb: u32,
     is_alive: bool
+}
+
+impl Host {
+    fn has_resources_for(
+        &self,
+        desired: &DesiredVm,
+    ) -> bool {
+        self.total_cpu - self.used_cpu >= desired.cpu && self.total_memory_mb - self.used_memory_mb >= desired.memory_mb
+    }
 }
