@@ -22,7 +22,7 @@ fn main() {
         for desired in &cp.desired_vms {
             if let Some(actual) = cp.actual_vms.iter_mut().find(|v| v.id == desired.id) {
                 let action = ControlPlane::reconcile_vm(desired, actual, &mut cp.hosts);
-                apply_action(action, actual, desired, &mut cp.hosts);
+                ControlPlane::apply_action(action, actual, desired, &mut cp.hosts);
                 println!("VM {} -> {:?} via {:?}", actual.id, actual.state, action);
             }
         }
@@ -95,49 +95,49 @@ impl ControlPlane {
 
         Action::NoOp
     }
-}
 
-fn apply_action(action: Action, actual: &mut ActualVm, desired: &DesiredVm, hosts: &mut [Host]) {
-    match action {
-        Action::AllocateHost { host_id } => {
-            if actual.host_id.is_none() {
-                actual.host_id = Some(host_id);
-                let host = hosts.iter_mut().find(|h| h.id == host_id).unwrap();
-                host.used_cpu += desired.cpu;
-                host.used_memory_mb += desired.memory_mb;
-                actual.cpu = desired.cpu;
-                actual.memory_mb = desired.memory_mb;
-                actual.state = VmState::Allocated;
+    fn apply_action(action: Action, actual: &mut ActualVm, desired: &DesiredVm, hosts: &mut [Host]) {
+        match action {
+            Action::AllocateHost { host_id } => {
+                if actual.host_id.is_none() {
+                    actual.host_id = Some(host_id);
+                    let host = hosts.iter_mut().find(|h| h.id == host_id).unwrap();
+                    host.used_cpu += desired.cpu;
+                    host.used_memory_mb += desired.memory_mb;
+                    actual.cpu = desired.cpu;
+                    actual.memory_mb = desired.memory_mb;
+                    actual.state = VmState::Allocated;
+                }
             }
-        }
-        Action::BootVm => {
-            actual.state = VmState::Booting;
-            let mut rng = rand::thread_rng();
-            if rng.gen_bool(0.3) {
-                actual.state = VmState::Failed;
-            } else {
-                actual.state = VmState::Running;
+            Action::BootVm => {
+                actual.state = VmState::Booting;
+                let mut rng = rand::thread_rng();
+                if rng.gen_bool(0.3) {
+                    actual.state = VmState::Failed;
+                } else {
+                    actual.state = VmState::Running;
+                }
             }
-        }
-        Action::StopVm => {
-            actual.state = VmState::Stopping;
-            // instant stop for now
-            actual.state = VmState::Stopped;
-        }
-        Action::ReleaseResources => {
-            if let Some(host_id) = actual.host_id {
-                let host =  hosts.iter_mut().find(|h| h.id == host_id).unwrap();
-                host.used_cpu -= actual.cpu;
-                host.used_memory_mb -= actual.memory_mb;
-                
+            Action::StopVm => {
+                actual.state = VmState::Stopping;
+                // instant stop for now
+                actual.state = VmState::Stopped;
             }
-            actual.host_id = None;
-            actual.state = VmState::Destroyed;
-            actual.cpu = 0;
-            actual.memory_mb = 0;
-        }
-        Action::NoOp => {
+            Action::ReleaseResources => {
+                if let Some(host_id) = actual.host_id {
+                    let host =  hosts.iter_mut().find(|h| h.id == host_id).unwrap();
+                    host.used_cpu -= actual.cpu;
+                    host.used_memory_mb -= actual.memory_mb;
+                    
+                }
+                actual.host_id = None;
+                actual.state = VmState::Destroyed;
+                actual.cpu = 0;
+                actual.memory_mb = 0;
+            }
+            Action::NoOp => {
 
+            }
         }
     }
 }
